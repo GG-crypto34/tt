@@ -1,0 +1,32 @@
+[Unit]
+Description=Public TikTok Movie Trend Telegram Bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+WorkingDirectory=@PROJECT_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=OMP_THREAD_LIMIT=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=@PROJECT_DIR@/.tools/ms-playwright
+ExecStart=@PROJECT_DIR@/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=@PROJECT_DIR@/data @PROJECT_DIR@/media @PROJECT_DIR@/logs
+MemoryHigh=1500M
+MemoryMax=1800M
+CPUQuota=180%
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
