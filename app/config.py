@@ -45,11 +45,15 @@ class Settings:
     log_dir: Path = Path("logs")
     request_timeout: float = 30
     search_wait_seconds: float = 12
+    search_page_wait_seconds: float = 5
+    search_query_timeout: float = 45
+    search_max_pages: int = 5
+    tiktok_storage_state: str = ""
     download_timeout: float = 120
     source_timeout: float = 90
     max_media_mb: int = 49
     max_candidates: int = 200
-    search_limit: int = 15
+    search_limit: int = 100
     request_delay_seconds: float = 2
     query_threshold: int = 3
     query_ttl_hours: float = 24
@@ -97,6 +101,9 @@ class Settings:
             "delivery_retention_days",
             "request_timeout",
             "search_wait_seconds",
+            "search_page_wait_seconds",
+            "search_query_timeout",
+            "search_max_pages",
             "download_timeout",
             "source_timeout",
             "max_media_mb",
@@ -110,6 +117,12 @@ class Settings:
                 raise ValueError(f"{key.upper()} должен быть > 0")
         if self.min_views < 0 or self.request_delay_seconds < 0:
             raise ValueError("MIN_VIEWS и REQUEST_DELAY_SECONDS должны быть >= 0")
+        if self.search_max_pages > 10 or self.search_limit > 500:
+            raise ValueError("SEARCH_MAX_PAGES <= 10 и SEARCH_LIMIT <= 500")
+        if self.search_query_timeout < self.search_wait_seconds:
+            raise ValueError("SEARCH_QUERY_TIMEOUT должен быть >= SEARCH_WAIT_SECONDS")
+        if self.tiktok_storage_state and not Path(self.tiktok_storage_state).is_file():
+            raise ValueError("TIKTOK_STORAGE_STATE должен указывать на существующий файл сессии")
         if self.media_retention_hours > 6 or self.max_media_mb > 49:
             raise ValueError("MEDIA_RETENTION_HOURS <= 6 и MAX_MEDIA_MB <= 49")
         if not 0 <= self.language_threshold <= 1:

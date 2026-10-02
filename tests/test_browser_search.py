@@ -37,6 +37,8 @@ class BrowserPage:
                 )
             if self.polls == 3:
                 payload = {
+                    "status_code": 0,
+                    "has_more": False,
                     "data": [
                         {
                             "item": {
@@ -47,7 +49,7 @@ class BrowserPage:
                                 "stats": {"playCount": 20000},
                             }
                         }
-                    ]
+                    ],
                 }
                 self.capture(
                     SimpleNamespace(
@@ -77,6 +79,7 @@ def install_browser(monkeypatch, page):
         "playwright.async_api.async_playwright",
         lambda: SimpleNamespace(start=AsyncMock(return_value=runtime)),
     )
+    return browser
 
 
 async def test_public_session_warms_up_and_waits_for_real_results(monkeypatch):

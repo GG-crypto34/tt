@@ -80,6 +80,8 @@ class BotController:
             )
             if db.enabled and db.state("discovery_available") == "0":
                 state = "🟡 сервис запущен, автоматический поиск TikTok недоступен"
+            elif db.enabled and db.state("discovery_limited") == "1":
+                state = "🟡 сервис работает, выдача TikTok ограничена"
             last = float(db.state("last_scan_at", "0"))
             tz = settings.timezone
             from zoneinfo import ZoneInfo
@@ -89,6 +91,7 @@ class BotController:
                 if last
                 else "ещё не было"
             )
+            depth = db.state("search_depth")
             await self._reply(
                 uid,
                 f"Вы авторизованы.\n{state}\n"
@@ -99,7 +102,8 @@ class BotController:
                 f"Актуальных кандидатов: {len(self.service.ranked(now, [uid]))}\n"
                 f"Следующая рассылка: "
                 f"{next_broadcast(datetime.fromtimestamp(now, UTC), tz):%d.%m %H:%M} ({tz})\n"
-                f"TikTok: {db.state('provider_health', 'ещё не проверен')}",
+                f"TikTok: {db.state('provider_health', 'ещё не проверен')}"
+                + (f"\nГлубина поиска: {depth}" if depth else ""),
             )
             return
         if command == "/logout":
@@ -228,16 +232,21 @@ class BotController:
                 text = "Скан остановлен: поиск и рассылка глобально отключены."
             elif not ran:
                 text = "Скан уже выполняется. Состояние можно проверить через /status."
-            elif db.state("discovery_available") == "0":
-                text = "Скан завершён с ошибкой поиска.\nTikTok: " + db.state("provider_health")
             else:
                 count = len(self.service.ranked(time.time(), [uid]))
+                outcome = (
+                    "Скан завершён с ошибкой поиска."
+                    if db.state("discovery_available") == "0"
+                    else "Скан завершён."
+                )
                 text = (
-                    f"Скан завершён.\nНайдено в выдаче: {db.state('scan_found', '0')}\n"
+                    f"{outcome}\nНайдено в выдаче: {db.state('scan_found', '0')}\n"
                     f"Отсеяно по возрасту: {db.state('scan_rejected_age', '0')}\n"
                     f"Актуальных кандидатов для вас: {count}\n"
                     f"TikTok: {db.state('provider_health', 'ещё не проверен')}"
                 )
+                if db.state("search_depth"):
+                    text += "\nГлубина поиска: " + db.state("search_depth")
                 if count:
                     text += "\nОтправьте /top для получения подборки."
         except Exception:

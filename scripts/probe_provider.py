@@ -28,6 +28,8 @@ async def probe(query: str, url: str | None, download: bool = False, limit: int 
             json.dumps(
                 {
                     "health": provider.health,
+                    "search_depth": provider.depth_health,
+                    "search_reports": provider.search_reports,
                     "downloaded_bytes": downloaded,
                     "eligible_count": sum(
                         eligible(video, time.time(), settings) for video in videos

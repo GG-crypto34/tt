@@ -102,6 +102,8 @@ class TrendService:
         successes = 0
         seen: set[str] = set()
         rejected = {"age": 0, "topic": 0, "language": 0}
+        deadline = asyncio.get_running_loop().time() + self.settings.scan_timeout_seconds
+        budget_limited = False
         log.info("scan_started queries=%s", queries)
         try:
             if hasattr(self.provider, "begin_scan"):
@@ -109,8 +111,15 @@ class TrendService:
             for query in queries:
                 if not self.db.enabled:
                     return
+                if (
+                    successes + failures
+                    and deadline - asyncio.get_running_loop().time()
+                    < self.settings.search_query_timeout + 10
+                ):
+                    budget_limited = True
+                    break
                 try:
-                    async with asyncio.timeout(self.settings.request_timeout * 2 + 1):
+                    async with asyncio.timeout(self.settings.search_query_timeout + 1):
                         items = await self.provider.search(query, self.settings.search_limit)
                     successes += 1
                     new_good = False
@@ -144,6 +153,12 @@ class TrendService:
                     return
                 if video.id in found or len(found) >= self.settings.max_candidates:
                     continue
+                if (
+                    deadline - asyncio.get_running_loop().time()
+                    < self.settings.request_timeout * 2 + 10
+                ):
+                    budget_limited = True
+                    break
                 try:
                     async with asyncio.timeout(self.settings.request_timeout * 2):
                         found[video.id] = await self.provider.metadata(video.url)
@@ -187,6 +202,13 @@ class TrendService:
             self.db.set_state("scan_found", str(len(seen)))
             self.db.set_state("scan_rejected_age", str(rejected["age"]))
             self.db.set_state("scan_accepted", str(accepted))
+            self.db.set_state("search_pages", str(getattr(self.provider, "search_pages", 0)))
+            depth = getattr(self.provider, "depth_health", "")
+            if budget_limited:
+                depth += "; сбор остановлен по бюджету времени scan"
+            self.db.set_state("search_depth", depth.lstrip("; "))
+            limited = budget_limited or getattr(self.provider, "search_limited", False)
+            self.db.set_state("discovery_limited", "1" if limited else "0")
             health = getattr(self.provider, "health", "ok")
             self.db.set_state(
                 "provider_health",
