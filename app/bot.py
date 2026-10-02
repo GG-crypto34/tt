@@ -9,7 +9,8 @@ from app.telegram import TelegramRejected, TelegramUncertain
 
 log = logging.getLogger(__name__)
 HELP = (
-    "/status — состояние\n/top — текущие TOP-3\n/pause — личная пауза\n"
+    "/status — состояние\n/scan — запустить поиск сейчас\n/top — текущие TOP-3\n"
+    "/pause — личная пауза\n"
     "/resume — возобновить рассылку\n/queries — запросы\n/logout — выйти\n"
     "/about — описание и источники данных\n"
     "/stop_service и /start_service — глобальное управление с отдельным паролем"
@@ -22,6 +23,8 @@ class BotController:
         self.pending: dict[int, tuple[str, float]] = {}
         self.top_tasks: dict[int, asyncio.Task] = {}
         self.top_last: dict[int, float] = {}
+        self.scan_task: asyncio.Task | None = None
+        self.scan_last: float = 0
 
     async def _reply(self, uid: int, text: str) -> None:
         await self.client.send_text(uid, text)
@@ -180,6 +183,25 @@ class BotController:
                     "Логотип и атрибуция: https://www.themoviedb.org/about/logos-attribution"
                 )
             await self._reply(uid, text)
+        elif command == "/scan":
+            if not db.enabled:
+                await self._reply(uid, "Поиск и рассылка глобально остановлены.")
+            elif self.service.scan_lock.locked() or (
+                self.scan_task is not None and not self.scan_task.done()
+            ):
+                await self._reply(
+                    uid, "Скан уже выполняется. Состояние можно проверить через /status."
+                )
+            elif now - self.scan_last < 60:
+                await self._reply(uid, "Ручной скан недавно запускался. Подождите минуту.")
+            else:
+                self.scan_last = now
+                await self._reply(
+                    uid,
+                    "Запускаю поиск новых видео. "
+                    "Скан может занять несколько минут; пришлю результат.",
+                )
+                self.scan_task = asyncio.create_task(self._scan(uid))
         elif command == "/top":
             if not db.enabled:
                 await self._reply(uid, "Поиск и рассылка глобально остановлены.")
@@ -195,6 +217,37 @@ class BotController:
                 self.top_tasks[uid] = asyncio.create_task(self._top(uid))
         else:
             await self._reply(uid, HELP)
+
+    async def _scan(self, uid: int) -> None:
+        db = self.service.db
+        try:
+            ran = await self.service.scan()
+            if not db.user(uid):
+                return
+            if not db.enabled:
+                text = "Скан остановлен: поиск и рассылка глобально отключены."
+            elif not ran:
+                text = "Скан уже выполняется. Состояние можно проверить через /status."
+            elif db.state("discovery_available") == "0":
+                text = "Скан завершён с ошибкой поиска.\nTikTok: " + db.state("provider_health")
+            else:
+                count = len(self.service.ranked(time.time(), [uid]))
+                text = (
+                    f"Скан завершён.\nНайдено в выдаче: {db.state('scan_found', '0')}\n"
+                    f"Отсеяно по возрасту: {db.state('scan_rejected_age', '0')}\n"
+                    f"Актуальных кандидатов для вас: {count}\n"
+                    f"TikTok: {db.state('provider_health', 'ещё не проверен')}"
+                )
+                if count:
+                    text += "\nОтправьте /top для получения подборки."
+        except Exception:
+            log.exception("manual_scan_failed user=%d", uid)
+            text = "Не удалось завершить скан. Проверьте /status и журнал сервиса."
+        try:
+            if db.user(uid):
+                await self._reply(uid, text)
+        except Exception:
+            log.exception("manual_scan_result_delivery_failed user=%d", uid)
 
     async def _top(self, uid: int) -> None:
         try:
@@ -234,6 +287,9 @@ class BotController:
                     log.warning("telegram_poll_unavailable")
                     await asyncio.sleep(5)
         finally:
-            for task in self.top_tasks.values():
+            tasks = list(self.top_tasks.values())
+            if self.scan_task is not None:
+                tasks.append(self.scan_task)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(*self.top_tasks.values(), return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)

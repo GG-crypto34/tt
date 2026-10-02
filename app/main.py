@@ -81,6 +81,7 @@ async def run(settings: Settings) -> None:
                     for command, description in (
                         ("start", "Авторизация"),
                         ("status", "Состояние"),
+                        ("scan", "Запустить поиск новых видео"),
                         ("top", "Текущий TOP-3"),
                         ("pause", "Личная пауза"),
                         ("resume", "Включить личную рассылку"),

@@ -72,9 +72,9 @@ class TrendService:
             result.append((video, velocity, score))
         return sorted(result, key=lambda item: (-item[2], item[0].id))
 
-    async def scan(self, now: float | None = None) -> None:
+    async def scan(self, now: float | None = None) -> bool:
         if self.scan_lock.locked() or not self.db.enabled:
-            return
+            return False
         async with self.scan_lock, self.work_lock:
             try:
                 async with asyncio.timeout(self.settings.scan_timeout_seconds):
@@ -85,6 +85,7 @@ class TrendService:
                     "provider_health", "Scan превысил общий timeout; повтор на следующем цикле"
                 )
                 log.warning("scan_timeout budget=%s", self.settings.scan_timeout_seconds)
+            return True
 
     async def _scan(self, now: float | None = None) -> None:
         if not self.db.enabled:
