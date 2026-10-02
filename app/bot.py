@@ -75,6 +75,8 @@ class BotController:
             state = (
                 "🟢 сервис работает" if db.enabled else "🔴 поиск и рассылка глобально остановлены"
             )
+            if db.enabled and db.state("discovery_available") == "0":
+                state = "🟡 сервис запущен, автоматический поиск TikTok недоступен"
             last = float(db.state("last_scan_at", "0"))
             tz = settings.timezone
             from zoneinfo import ZoneInfo
@@ -89,6 +91,8 @@ class BotController:
                 f"Вы авторизованы.\n{state}\n"
                 f"Личная рассылка: {'включена' if user['mailing_enabled'] else 'пауза'}\n"
                 f"Последний scan: {formatted}\n"
+                f"Найдено в выдаче: {db.state('scan_found', '0')}; "
+                f"отсеяно по возрасту: {db.state('scan_rejected_age', '0')}\n"
                 f"Актуальных кандидатов: {len(self.service.ranked(now, [uid]))}\n"
                 f"Следующая рассылка: "
                 f"{next_broadcast(datetime.fromtimestamp(now, UTC), tz):%d.%m %H:%M} ({tz})\n"

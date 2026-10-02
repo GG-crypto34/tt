@@ -1,9 +1,11 @@
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from app.bot import BotController
 from app.config import Settings
 from app.process_lock import ProcessLock
 from app.providers.public import ProviderUnavailable, PublicTikTokProvider, parse_items
@@ -51,7 +53,7 @@ async def test_subtitles_are_public_bounded_and_help_language(system):
         await provider.close()
 
 
-async def test_ttl_does_not_extend_for_unrelated_fallback_seed(system):
+async def test_ttl_does_not_extend_for_unrelated_search_result(system):
     now = time.time()
     qid = system.db.propose("#другойзапрос", now - 23 * 3600, 7)
     assert system.db.decide_query(qid, 1, True, now - 23 * 3600, 24)
@@ -94,6 +96,48 @@ async def test_provider_outage_preserves_bot_and_previous_data(system):
     assert len(system.db.rows("SELECT * FROM videos")) == 5
     assert len(system.db.rows("SELECT * FROM metric_snapshots")) == 5
     assert "ошибок" in system.db.state("provider_health")
+    assert system.db.state("discovery_available") == "0"
+
+
+async def test_old_search_results_do_not_displace_new_candidates(system):
+    now = time.time()
+    system.settings.max_candidates = 1
+    fresh = system.provider.videos[0]
+    old = replace(fresh, id="old", published_at=now - 48 * 3600)
+    system.provider.search = AsyncMock(return_value=[old, fresh])
+    await system.scan(now)
+    candidates = system.db.candidates(now, 24)
+    assert len(candidates) == 1 and candidates[0].id == fresh.id
+    assert system.db.state("scan_found") == "2"
+    assert system.db.state("scan_rejected_age") == "1"
+
+
+async def test_search_outage_is_distinct_from_no_matching_videos(system):
+    system.provider.search = AsyncMock(side_effect=ProviderUnavailable("offline"))
+    await system.scan()
+    await system.broadcast(user_id=1)
+    assert "поиск TikTok недоступен" in system.messenger.messages[-1]["text"]
+    bot = BotController(system, system.messenger)
+    await bot.handle(
+        {"message": {"from": {"id": 1}, "chat": {"type": "private"}, "text": "/status"}}
+    )
+    assert "🟡" in system.messenger.messages[-1]["text"]
+    assert "резерв" not in system.messenger.messages[-1]["text"]
+    system.provider.search = AsyncMock(return_value=[])
+    await system.scan()
+    await system.broadcast(user_id=1)
+    assert "новых подходящих видео не найдено" in system.messenger.messages[-1]["text"]
+
+
+def test_live_automatic_search_requires_browser():
+    settings = Settings(
+        telegram_bot_token="test",
+        user_password="user",
+        admin_password="admin",
+        browser_enabled=False,
+    )
+    with pytest.raises(ValueError, match="BROWSER_ENABLED=true"):
+        settings.validate()
 
 
 async def test_candidate_capacity_and_no_media_during_scan(system):

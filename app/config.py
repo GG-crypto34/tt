@@ -8,15 +8,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dotenv import load_dotenv
 
 BASE_QUERIES = (
+    "нарезка из фильма",
+    "момент из фильма",
+    "момент из сериала",
     "фильм",
     "фильмы",
     "сериал",
     "сериалы",
     "кино",
     "нарезка",
-    "нарезка из фильма",
-    "момент из фильма",
-    "момент из сериала",
     "лучшие моменты",
     "#фильм",
     "#фильмы",
@@ -43,7 +43,6 @@ class Settings:
     data_dir: Path = Path("data")
     media_dir: Path = Path("media")
     log_dir: Path = Path("logs")
-    seed_urls_file: Path = Path("data/seed_urls.txt")
     request_timeout: float = 30
     search_wait_seconds: float = 12
     download_timeout: float = 120
@@ -87,6 +86,8 @@ class Settings:
                     raise ValueError(f"Заполните {key.upper()} в .env")
             if self.user_password == self.admin_password:
                 raise ValueError("USER_PASSWORD и ADMIN_PASSWORD должны различаться")
+            if not self.browser_enabled:
+                raise ValueError("Для автоматического поиска установите BROWSER_ENABLED=true")
         for key in (
             "scan_interval_minutes",
             "scan_timeout_seconds",

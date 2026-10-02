@@ -53,7 +53,7 @@ def test_hydration_and_search_response_parser():
         canonical_url("http://localhost/metadata")
 
 
-async def test_public_metadata_seed_fallback_and_cdn_redirect_download(tmp_path):
+async def test_public_metadata_and_cdn_redirect_download(tmp_path):
     requested = []
     data = b"\x00\x00\x00\x18ftypmp42" + b"video" * 100
 
@@ -65,23 +65,16 @@ async def test_public_metadata_seed_fallback_and_cdn_redirect_download(tmp_path)
             return httpx.Response(302, headers={"location": "https://v.tiktokcdn.com/final.mp4"})
         return httpx.Response(200, content=data)
 
-    settings = Settings(
-        browser_enabled=False, request_delay_seconds=0, seed_urls_file=tmp_path / "seeds.txt"
-    )
-    settings.seed_urls_file.write_text(
-        "https://www.tiktok.com/@demo/video/1234567890\n", encoding="utf-8"
-    )
+    settings = Settings(browser_enabled=False, request_delay_seconds=0)
     provider = PublicTikTokProvider(
         settings, httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
     try:
-        videos = await provider.search("фильм", 3)
-        assert videos[0].metrics.views == 18000
+        video = await provider.metadata("https://www.tiktok.com/@demo/video/1234567890")
+        assert video.metrics.views == 18000
         assert len(requested) == 1
-        await provider.search("сериал", 3)
-        assert len(requested) == 1  # Seed metadata only once per scan.
         destination = tmp_path / "selected.mp4"
-        await provider.download(videos[0], destination)
+        await provider.download(video, destination)
         assert destination.read_bytes() == data and not destination.with_suffix(".part").exists()
     finally:
         await provider.close()
@@ -111,15 +104,15 @@ async def test_bad_or_oversize_media_is_removed(tmp_path, content):
         await provider.close()
 
 
-async def test_browser_failure_falls_back_and_is_reported(tmp_path):
-    provider = PublicTikTokProvider(Settings(seed_urls_file=tmp_path / "empty"))
+async def test_browser_failure_is_reported_without_manual_fallback():
+    provider = PublicTikTokProvider(Settings())
     provider._page_items = AsyncMock(side_effect=ProviderUnavailable("CAPTCHA требуется"))
     try:
         with pytest.raises(ProviderUnavailable, match="CAPTCHA"):
             await provider.search("фильм", 3)
         with pytest.raises(ProviderUnavailable):
             await provider.search("сериал", 3)
-        assert provider._page_items.await_count == 1  # Stop search after first blocked request.
+        assert provider._page_items.await_count == 2  # Other queries are still tried.
     finally:
         await provider.close()
 

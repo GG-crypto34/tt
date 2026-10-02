@@ -80,6 +80,7 @@ class TrendService:
                 async with asyncio.timeout(self.settings.scan_timeout_seconds):
                     await self._scan(now)
             except TimeoutError:
+                self.db.set_state("discovery_available", "0")
                 self.db.set_state(
                     "provider_health", "Scan превысил общий timeout; повтор на следующем цикле"
                 )
@@ -97,6 +98,9 @@ class TrendService:
         found: dict[str, Video] = {}
         observed_at: dict[str, float] = {}
         failures = 0
+        successes = 0
+        seen: set[str] = set()
+        rejected = {"age": 0, "topic": 0, "language": 0}
         log.info("scan_started queries=%s", queries)
         try:
             if hasattr(self.provider, "begin_scan"):
@@ -105,16 +109,23 @@ class TrendService:
                 if not self.db.enabled:
                     return
                 try:
-                    async with asyncio.timeout(
-                        self.settings.request_timeout * (self.settings.max_candidates + 1)
-                    ):
+                    async with asyncio.timeout(self.settings.request_timeout * 2 + 1):
                         items = await self.provider.search(query, self.settings.search_limit)
+                    successes += 1
                     new_good = False
                     for video in items:
-                        if len(found) >= self.settings.max_candidates:
-                            break
+                        captured = now if now is not None else time.time()
+                        age = (captured - video.published_at) / 3600
+                        if not 0 <= age <= self.settings.max_video_age_hours:
+                            if video.id not in seen:
+                                rejected["age"] += 1
+                            seen.add(video.id)
+                            continue
+                        seen.add(video.id)
+                        if video.id not in found and len(found) >= self.settings.max_candidates:
+                            continue
                         found[video.id] = video
-                        observed_at[video.id] = now if now is not None else time.time()
+                        observed_at[video.id] = captured
                         query_matches = not query.startswith("#") or query[1:].lower() in {
                             tag.lower().lstrip("#") for tag in video.hashtags
                         }
@@ -142,7 +153,6 @@ class TrendService:
                     )
                 await asyncio.sleep(self.settings.request_delay_seconds)
             accepted = 0
-            rejected = {"age": 0, "topic": 0, "language": 0}
             for video in found.values():
                 captured = observed_at[video.id]
                 age = (captured - video.published_at) / 3600
@@ -171,6 +181,11 @@ class TrendService:
                 (self.settings.max_candidates,),
             )
             self.db.set_state("last_scan_at", str(started))
+            available = successes > 0 and getattr(self.provider, "search_available", True)
+            self.db.set_state("discovery_available", "1" if available else "0")
+            self.db.set_state("scan_found", str(len(seen)))
+            self.db.set_state("scan_rejected_age", str(rejected["age"]))
+            self.db.set_state("scan_accepted", str(accepted))
             health = getattr(self.provider, "health", "ok")
             self.db.set_state(
                 "provider_health",
@@ -179,12 +194,13 @@ class TrendService:
             await self._propose_queries(started)
             log.info(
                 "scan_complete raw=%d accepted=%d filtered=%s failures=%d",
-                len(found),
+                len(seen),
                 accepted,
                 rejected,
                 failures,
             )
         except Exception:
+            self.db.set_state("discovery_available", "0")
             self.db.set_state("provider_health", "Ошибка scan; подробности в журнале")
             log.exception("scan_failed")
         finally:
@@ -319,9 +335,18 @@ class TrendService:
             for uid in users:
                 if not any(not self.db.delivered(uid, v.id) for v, _, _ in selected):
                     try:
-                        await self.messenger.send_text(
-                            uid, "За последний цикл новых подходящих видео не найдено."
-                        )
+                        discovery = self.db.state("discovery_available", "unknown")
+                        if discovery == "0":
+                            empty_text = (
+                                "Автоматический поиск TikTok недоступен. "
+                                "Подборку сейчас сформировать не удалось; "
+                                "бот повторит поиск на следующем цикле."
+                            )
+                        elif discovery == "unknown":
+                            empty_text = "Первый автоматический поиск ещё не завершён."
+                        else:
+                            empty_text = "За последний цикл новых подходящих видео не найдено."
+                        await self.messenger.send_text(uid, empty_text)
                     except Exception as error:
                         log.warning(
                             "empty_delivery_failed user=%d type=%s", uid, type(error).__name__

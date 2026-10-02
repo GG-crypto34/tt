@@ -31,10 +31,6 @@ export PLAYWRIGHT_BROWSERS_PATH="$project_dir/.tools/ms-playwright"
 .venv/bin/python -m playwright install chromium --only-shell
 mkdir -p data media logs
 chmod 700 data media logs
-if [[ ! -e data/seed_urls.txt ]]; then
-  printf '%s\n' '# Полные публичные https://www.tiktok.com/@author/video/ID ссылки, по одной на строку.' \
-    > data/seed_urls.txt
-fi
 if [[ ! -e .env ]]; then
   cp .env.example .env
   chmod 600 .env

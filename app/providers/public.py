@@ -20,6 +20,10 @@ class ProviderUnavailable(RuntimeError):
     pass
 
 
+class ProviderAccessBlocked(ProviderUnavailable):
+    pass
+
+
 def canonical_url(url: str) -> str:
     match = VIDEO_URL.fullmatch(url.split("?")[0].rstrip("/"))
     if not match:
@@ -115,18 +119,18 @@ class PublicTikTokProvider:
         self._context = None
         self._lock = asyncio.Lock()
         self._search_failed = False
-        self._failed_kinds: set[str] = set()
         self._success_kinds: set[str] = set()
         self._failure_reasons: dict[str, str] = {}
-        self._seed_cache: list[Video] | None = None
         self.health = "Ещё не проверен"
+
+    @property
+    def search_available(self) -> bool:
+        return bool(self._success_kinds) and not self._search_failed
 
     async def begin_scan(self) -> None:
         self._search_failed = False
-        self._failed_kinds.clear()
         self._success_kinds.clear()
         self._failure_reasons.clear()
-        self._seed_cache = None
 
     async def end_scan(self) -> None:
         if self._browser:
@@ -158,6 +162,7 @@ class PublicTikTokProvider:
                             "/api/item/detail/",
                         )
                     )
+                    and urlparse(response.url).hostname == "www.tiktok.com"
                     and response.status == 200
                     and len(responses) < 5
                 ):
@@ -174,6 +179,7 @@ class PublicTikTokProvider:
                         await self._check_access(page)
                     await page.goto(url, wait_until="domcontentloaded")
                     found = {v.id: v for v in parse_html(await page.content())}
+                    search_complete = False
                     deadline = asyncio.get_running_loop().time() + self.settings.search_wait_seconds
                     while True:
                         await self._check_access(page)
@@ -187,9 +193,17 @@ class PublicTikTokProvider:
                             except json.JSONDecodeError:
                                 log.debug("provider_response_not_json")
                                 continue
+                            if (
+                                urlparse(response.url).path
+                                in ("/api/search/general/full/", "/api/search/item/full/")
+                                and isinstance(data, dict)
+                                and data.get("status_code") == 0
+                                and isinstance(data.get("data"), list)
+                            ):
+                                search_complete = True
                             for video in parse_items(data):
                                 found[video.id] = video
-                        if found:
+                        if found or search_complete:
                             return list(found.values())
                         if asyncio.get_running_loop().time() >= deadline:
                             raise ProviderUnavailable(
@@ -209,22 +223,25 @@ class PublicTikTokProvider:
                 "captcha",
                 "проверку безопасности",
                 "drag the slider",
+                "передвиньте ползунок",
                 "access denied",
             )
         ):
-            raise ProviderUnavailable("TikTok требует проверку: обход отключён")
+            raise ProviderAccessBlocked("TikTok требует проверку: обход отключён")
 
     def _update_health(self) -> None:
         labels = {"search": "запросы", "tag": "хэштеги"}
         if self._success_kinds:
             available = ", ".join(labels[k] for k in sorted(self._success_kinds))
-            self.health = f"Публичный поиск доступен: {available}"
+            self.health = f"Автоматический поиск доступен: {available}; анонимная выдача ограничена"
             if self._failure_reasons:
                 failed = ", ".join(labels[k] for k in sorted(self._failure_reasons))
-                self.health += f"; недоступны: {failed}; резерв: seed_urls.txt"
+                self.health += f"; не выполнена часть запросов: {failed}"
         elif self._failure_reasons:
             reason = next(iter(self._failure_reasons.values()))
-            self.health = f"Поиск недоступен: {reason}; резерв: seed_urls.txt"
+            self.health = f"Автоматический поиск недоступен: {reason}; повтор на следующем цикле"
+        if self._search_failed:
+            self.health = "TikTok остановил поиск проверкой доступа; повтор на следующем цикле"
 
     async def _route(self, route) -> None:
         if route.request.resource_type in ("image", "media", "font"):
@@ -253,62 +270,31 @@ class PublicTikTokProvider:
                 return video
         raise ProviderUnavailable("Публичные metadata видео недоступны")
 
-    async def _seeds(self) -> list[Video]:
-        if self._seed_cache is not None:
-            return self._seed_cache
-        self._seed_cache = []
-        path = self.settings.seed_urls_file
-        if not path.exists():
-            return []
-        urls = list(
-            dict.fromkeys(
-                line.strip()
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip() and not line.startswith("#")
-            )
-        )
-        for url in urls[: self.settings.max_candidates]:
-            try:
-                self._seed_cache.append(await self.metadata(url))
-            except Exception as error:
-                log.warning("seed_metadata_failure type=%s", type(error).__name__)
-            await asyncio.sleep(self.settings.request_delay_seconds)
-        return self._seed_cache
-
     async def search(self, query: str, limit: int) -> list[Video]:
-        found = []
         kind = "tag" if query.startswith("#") else "search"
-        if (
-            self.settings.browser_enabled
-            and not self._search_failed
-            and kind not in self._failed_kinds
-        ):
-            url = (
-                f"https://www.tiktok.com/tag/{quote(query[1:])}"
-                if query.startswith("#")
-                else f"https://www.tiktok.com/search?q={quote(query)}"
-            )
-            try:
-                found = await self._page_items(url)
-                self._success_kinds.add(kind)
-            except Exception as error:
-                self._failed_kinds.add(kind)
-                if isinstance(error, ProviderUnavailable) and "обход отключён" in str(error):
-                    self._search_failed = True
-                reason = (
-                    str(error) if isinstance(error, ProviderUnavailable) else type(error).__name__
-                )
-                self._failure_reasons[kind] = reason
-                log.warning("provider_search_unavailable type=%s", type(error).__name__)
+        if not self.settings.browser_enabled:
+            self.health = "Автоматический поиск отключён: требуется BROWSER_ENABLED=true"
+            raise ProviderUnavailable(self.health)
+        if self._search_failed:
+            raise ProviderAccessBlocked(self.health)
+        # Hashtags use the ordinary public search box too. The /tag page currently
+        # fails anonymously and is not necessary for searching a literal hashtag.
+        try:
+            found = await self._page_items(f"https://www.tiktok.com/search?q={quote(query)}")
+            self._success_kinds.add(kind)
+            self._failure_reasons.pop(kind, None)
             self._update_health()
-        elif not self.settings.browser_enabled:
-            self.health = "Поиск отключён; резерв: seed_urls.txt"
-        seeds = await self._seeds()
-        if not found and not seeds:
-            raise ProviderUnavailable(self.health + "; резервных результатов нет")
-        # Seed URLs are monitored regardless of the search query, deduplicated by scanner.
-        newest = sorted(found, key=lambda video: video.published_at, reverse=True)[:limit]
-        return list({v.id: v for v in newest + seeds}.values())
+            return sorted(found, key=lambda video: video.published_at, reverse=True)[:limit]
+        except Exception as error:
+            if isinstance(error, ProviderAccessBlocked):
+                self._search_failed = True
+            reason = str(error) if isinstance(error, ProviderUnavailable) else type(error).__name__
+            self._failure_reasons[kind] = reason
+            log.warning("provider_search_unavailable type=%s", type(error).__name__)
+            self._update_health()
+            if self._search_failed:
+                raise ProviderAccessBlocked(self.health) from error
+            raise ProviderUnavailable(self.health) from error
 
     async def download(self, video: Video, destination: Path) -> None:
         # Refresh expiring CDN URL only for selected TOP videos.
