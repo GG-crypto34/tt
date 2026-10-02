@@ -45,6 +45,7 @@ class Settings:
     log_dir: Path = Path("logs")
     seed_urls_file: Path = Path("data/seed_urls.txt")
     request_timeout: float = 30
+    search_wait_seconds: float = 12
     download_timeout: float = 120
     source_timeout: float = 90
     max_media_mb: int = 49
@@ -94,6 +95,7 @@ class Settings:
             "metrics_retention_hours",
             "delivery_retention_days",
             "request_timeout",
+            "search_wait_seconds",
             "download_timeout",
             "source_timeout",
             "max_media_mb",

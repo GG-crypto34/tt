@@ -116,12 +116,16 @@ class PublicTikTokProvider:
         self._lock = asyncio.Lock()
         self._search_failed = False
         self._failed_kinds: set[str] = set()
+        self._success_kinds: set[str] = set()
+        self._failure_reasons: dict[str, str] = {}
         self._seed_cache: list[Video] | None = None
         self.health = "Ещё не проверен"
 
     async def begin_scan(self) -> None:
         self._search_failed = False
         self._failed_kinds.clear()
+        self._success_kinds.clear()
+        self._failure_reasons.clear()
         self._seed_cache = None
 
     async def end_scan(self) -> None:
@@ -135,6 +139,7 @@ class PublicTikTokProvider:
         from playwright.async_api import async_playwright
 
         async with self._lock:
+            fresh_session = self._browser is None
             if not self._browser:
                 self._runtime = await async_playwright().start()
                 self._browser = await self._runtime.chromium.launch(headless=True)
@@ -145,8 +150,14 @@ class PublicTikTokProvider:
 
             def capture(response):
                 if (
-                    "/api/" in response.url
-                    and any(kind in response.url for kind in ("search", "item_list", "detail"))
+                    any(
+                        path in response.url
+                        for path in (
+                            "/api/search/",
+                            "/api/challenge/item_list/",
+                            "/api/item/detail/",
+                        )
+                    )
                     and response.status == 200
                     and len(responses) < 5
                 ):
@@ -155,24 +166,22 @@ class PublicTikTokProvider:
             page.on("response", capture)
             try:
                 async with asyncio.timeout(self.settings.request_timeout):
+                    if fresh_session:
+                        # Visit the public entry page before navigating to search, as a browser
+                        # normally does. No injected cookies, signatures or login state.
+                        await page.goto("https://www.tiktok.com/", wait_until="domcontentloaded")
+                        await page.wait_for_timeout(1500)
+                        await self._check_access(page)
                     await page.goto(url, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2500)
-                    body = (await page.locator("body").inner_text())[:10000].lower()
-                    if any(
-                        t in body
-                        for t in (
-                            "verify to continue",
-                            "captcha",
-                            "проверку безопасности",
-                            "drag the slider",
-                            "access denied",
-                        )
-                    ):
-                        raise ProviderUnavailable("TikTok требует проверку: обход отключён")
                     found = {v.id: v for v in parse_html(await page.content())}
-                    for response in responses:
-                        payload = await response.text()
-                        if len(payload) <= 4_000_000:
+                    deadline = asyncio.get_running_loop().time() + self.settings.search_wait_seconds
+                    while True:
+                        await self._check_access(page)
+                        while responses:
+                            response = responses.pop(0)
+                            payload = await response.text()
+                            if len(payload) > 4_000_000:
+                                continue
                             try:
                                 data = json.loads(payload)
                             except json.JSONDecodeError:
@@ -180,13 +189,42 @@ class PublicTikTokProvider:
                                 continue
                             for video in parse_items(data):
                                 found[video.id] = video
-                    if not found:
-                        raise ProviderUnavailable(
-                            "Публичная страница не отдала metadata/search JSON"
-                        )
-                    return list(found.values())
+                        if found:
+                            return list(found.values())
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise ProviderUnavailable(
+                                "Публичная страница не отдала metadata/search JSON после ожидания"
+                            )
+                        # Wait for actual page responses instead of a single short fixed sleep.
+                        await page.wait_for_timeout(250)
             finally:
                 await page.close()
+
+    async def _check_access(self, page) -> None:
+        body = (await page.locator("body").inner_text())[:10000].lower()
+        if any(
+            t in body
+            for t in (
+                "verify to continue",
+                "captcha",
+                "проверку безопасности",
+                "drag the slider",
+                "access denied",
+            )
+        ):
+            raise ProviderUnavailable("TikTok требует проверку: обход отключён")
+
+    def _update_health(self) -> None:
+        labels = {"search": "запросы", "tag": "хэштеги"}
+        if self._success_kinds:
+            available = ", ".join(labels[k] for k in sorted(self._success_kinds))
+            self.health = f"Публичный поиск доступен: {available}"
+            if self._failure_reasons:
+                failed = ", ".join(labels[k] for k in sorted(self._failure_reasons))
+                self.health += f"; недоступны: {failed}; резерв: seed_urls.txt"
+        elif self._failure_reasons:
+            reason = next(iter(self._failure_reasons.values()))
+            self.health = f"Поиск недоступен: {reason}; резерв: seed_urls.txt"
 
     async def _route(self, route) -> None:
         if route.request.resource_type in ("image", "media", "font"):
@@ -252,7 +290,7 @@ class PublicTikTokProvider:
             )
             try:
                 found = await self._page_items(url)
-                self.health = "Публичный поиск доступен"
+                self._success_kinds.add(kind)
             except Exception as error:
                 self._failed_kinds.add(kind)
                 if isinstance(error, ProviderUnavailable) and "обход отключён" in str(error):
@@ -260,15 +298,17 @@ class PublicTikTokProvider:
                 reason = (
                     str(error) if isinstance(error, ProviderUnavailable) else type(error).__name__
                 )
-                self.health = f"Поиск недоступен: {reason}; резерв: seed_urls.txt"
+                self._failure_reasons[kind] = reason
                 log.warning("provider_search_unavailable type=%s", type(error).__name__)
+            self._update_health()
         elif not self.settings.browser_enabled:
             self.health = "Поиск отключён; резерв: seed_urls.txt"
         seeds = await self._seeds()
         if not found and not seeds:
             raise ProviderUnavailable(self.health + "; резервных результатов нет")
         # Seed URLs are monitored regardless of the search query, deduplicated by scanner.
-        return list({v.id: v for v in found[:limit] + seeds}.values())
+        newest = sorted(found, key=lambda video: video.published_at, reverse=True)[:limit]
+        return list({v.id: v for v in newest + seeds}.values())
 
     async def download(self, video: Video, destination: Path) -> None:
         # Refresh expiring CDN URL only for selected TOP videos.
